@@ -7,6 +7,13 @@ public class Result<T> {
 	private String message;
 	
 	private T data;
+	
+	public Result(){};
+	
+	public Result(int code,String message){
+		this.code=code;
+		this.message=message;
+	};
 
 	public int getCode() {
 		return code;

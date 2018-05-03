@@ -1,10 +1,17 @@
 package com.allen.filter;
 
+import java.util.concurrent.TimeUnit;
+
 import javax.servlet.http.HttpServletRequest;
 
+import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.http.HttpStatus;
 
 import com.allen.constant.Constant;
 import com.allen.model.Result;
@@ -23,6 +30,12 @@ import com.netflix.zuul.context.RequestContext;
 public class AccessFilter extends ZuulFilter{
 	
 	private static Logger log = LoggerFactory.getLogger(AccessFilter.class);
+	
+	@Value("${auth.key}")
+	private String authKey;
+	
+	@Autowired
+	private StringRedisTemplate stringRedisTemplate;
 
 	/**
 	 * 过滤器的类型，它决定过滤器在请求的哪个生命周期中执行
@@ -64,18 +77,49 @@ public class AccessFilter extends ZuulFilter{
 		RequestContext ctx=RequestContext.getCurrentContext();
 		HttpServletRequest request=ctx.getRequest();
 		
-		String accessToken=request.getParameter(Constant.ACCESS_TOKEN);
-		if(StringUtils.isEmpty(accessToken)){
-			log.warn("access token is empty");
+		//获取鉴权参数
+		String requestTime=request.getHeader(Constant.REQUEST_TIME);
+		String accessToken=request.getHeader(Constant.ACCESS_TOKEN);
+		
+		//判空
+		if(StringUtils.isEmpty(requestTime)||StringUtils.isEmpty(accessToken)){
 			ctx.setSendZuulResponse(false);
-			Result<Object> result=new Result<>();
-			result.setCode(401);
-			result.setMessage("access token is empty");
-			ctx.setResponseBody(JsonUtil.beanToJson(result));
+			ctx.setResponseBody(JsonUtil.beanToJson(new Result<>(HttpStatus.UNAUTHORIZED.value(),"requestTime or accesToken is empty!")));
 			return null;
 		}
-		log.info("access token is ok~");
+		
+		//校验请求时间
+		Long interval=(System.currentTimeMillis()-Long.parseLong(requestTime))/(1000*60);
+		if(interval.intValue()>Constant.REQUEST_EXPIRED_TIME){
+			ctx.setSendZuulResponse(false);
+			ctx.setResponseBody(JsonUtil.beanToJson(new Result<>(HttpStatus.UNAUTHORIZED.value(),"requestTime is expired!")));
+			return null;
+		}
+		
+		//校验accessToken
+		if(StringUtils.isNotEmpty(this.stringRedisTemplate.opsForValue().get(Constant.ACCESS_TOKEN_CACHING_PREFIX+accessToken))){
+			ctx.setSendZuulResponse(false);
+			ctx.setResponseBody(JsonUtil.beanToJson(new Result<>(HttpStatus.UNAUTHORIZED.value(),"accessToken has been used!")));
+			return null;
+		}
+		if(!accessToken.equals(DigestUtils.md5Hex(requestTime+this.authKey))){
+			ctx.setSendZuulResponse(false);
+			ctx.setResponseBody(JsonUtil.beanToJson(new Result<>(HttpStatus.UNAUTHORIZED.value(),"accessToken is invalid!")));
+			return null;
+		}
+		
+		//验证通过，放行
+		log.info("accessToken is available!");
+        this.cachingAccessToken(accessToken);
 		return null;
+	}
+	
+	/**
+	 * accessToken验证通过，缓存accessToken,用于判断该accessToken是否已使用过
+	 */
+	private void cachingAccessToken(String accessToken){
+		this.stringRedisTemplate.opsForValue().setIfAbsent(Constant.ACCESS_TOKEN_CACHING_PREFIX+accessToken, accessToken);
+		this.stringRedisTemplate.expire(Constant.ACCESS_TOKEN_CACHING_PREFIX+accessToken, Constant.REQUEST_EXPIRED_TIME, TimeUnit.MINUTES);
 	}
 
 }
